@@ -104,6 +104,11 @@ var DeltaExclusions = []string{
 // normal builds. It's typically 100–150 MB and easily re-downloaded if needed.
 const wrapperZipExclusion = "wrapper/dists/*/*/*.zip"
 
+// gradleExclusions returns the tar --exclude patterns for a base bundle.
+func gradleExclusions() []string {
+	return append(append([]string{}, CacheExclusions...), wrapperZipExclusion)
+}
+
 // IsExcludedCache reports whether a file or directory name matches any cache exclusion pattern.
 func IsExcludedCache(name string) bool {
 	return matchesAny(name, CacheExclusions)

@@ -605,7 +605,7 @@ func TestTarZstdRoundTrip(t *testing.T) {
 
 	// Create archive into a buffer.
 	var buf bytes.Buffer
-	if err := CreateTarZstd(ctx, &buf, sources); err != nil {
+	if err := CreateTarZstd(ctx, &buf, sources, gradleExclusions()); err != nil {
 		t.Fatalf("CreateTarZstd: %v", err)
 	}
 
@@ -671,7 +671,7 @@ func TestTarZstdSymlinkDereference(t *testing.T) {
 	must(t, os.Symlink(realDir, cachesLink))
 
 	var buf bytes.Buffer
-	if err := CreateTarZstd(ctx, &buf, []TarSource{{BaseDir: srcDir, Path: "./caches"}}); err != nil {
+	if err := CreateTarZstd(ctx, &buf, []TarSource{{BaseDir: srcDir, Path: "./caches"}}, gradleExclusions()); err != nil {
 		t.Fatalf("CreateTarZstd: %v", err)
 	}
 

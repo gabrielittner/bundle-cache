@@ -318,7 +318,7 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 	if !cfg.SkipWarm {
 		log.Debug("warming page cache")
 		warmStart := time.Now()
-		warmPageCache(ctx, sources)
+		warmPageCache(ctx, sources, gradleExclusions())
 		log.Debug("page cache warm", "duration", time.Since(warmStart).Round(time.Millisecond))
 	} else {
 		log.Debug("skipping page cache warm (SkipWarm=true)")
@@ -331,7 +331,7 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 
 	var archiveErr error
 	go func() {
-		archiveErr = CreateTarZstd(ctx, pw, sources)
+		archiveErr = CreateTarZstd(ctx, pw, sources, gradleExclusions())
 		pw.CloseWithError(archiveErr) //nolint:errcheck,gosec
 	}()
 
@@ -562,7 +562,7 @@ func matchesAny(name string, patterns []string) bool {
 // IOPS overhead. Warming the cache saturates IOPS up front so that tar
 // subsequently reads at memory speed (~1300 MB/s). On non-Linux platforms,
 // falls back to reading files into the page cache directly.
-func warmPageCache(ctx context.Context, sources []TarSource) {
+func warmPageCache(ctx context.Context, sources []TarSource, excludes []string) {
 	concurrency := min(runtime.GOMAXPROCS(0)*2, 32)
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
@@ -577,12 +577,12 @@ func warmPageCache(ctx context.Context, sources []TarSource) {
 				return nil
 			}
 			if d.IsDir() {
-				if IsExcludedCache(d.Name()) {
+				if matchesAny(d.Name(), excludes) {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if !d.Type().IsRegular() || IsExcludedCache(d.Name()) {
+			if !d.Type().IsRegular() || matchesAny(d.Name(), excludes) {
 				return nil
 			}
 			sem <- struct{}{}
@@ -600,12 +600,11 @@ func warmPageCache(ctx context.Context, sources []TarSource) {
 // CreateTarZstd creates a zstd-compressed tar archive from the given sources.
 // If pzstd is available it is used to produce a multi-frame archive that can
 // be decompressed in parallel on restore. Otherwise klauspost is used.
-func CreateTarZstd(ctx context.Context, w io.Writer, sources []TarSource) error {
+func CreateTarZstd(ctx context.Context, w io.Writer, sources []TarSource, excludes []string) error {
 	tarArgs := []string{"-chf", "-"}
-	for _, pat := range CacheExclusions {
+	for _, pat := range excludes {
 		tarArgs = append(tarArgs, "--exclude", pat)
 	}
-	tarArgs = append(tarArgs, "--exclude", wrapperZipExclusion)
 	for _, src := range sources {
 		tarArgs = append(tarArgs, "-C", src.BaseDir, src.Path)
 	}
