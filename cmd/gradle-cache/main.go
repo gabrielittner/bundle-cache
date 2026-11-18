@@ -84,6 +84,14 @@ func validateIncludedBuilds(baseDir string, entries []string) error {
 	return nil
 }
 
+// includedBuildsOrBuildSrc returns buildSrc if no included build is given.
+func includedBuildsOrBuildSrc(includedBuilds []string) []string {
+	if len(includedBuilds) == 0 {
+		return []string{"buildSrc"}
+	}
+	return includedBuilds
+}
+
 // ── Restore ─────────────────────────────────────────────────────────────────
 
 type RestoreCmd struct {
@@ -109,20 +117,18 @@ func (c *RestoreCmd) AfterApply() error {
 func (c *RestoreCmd) Run(ctx context.Context, metrics gradlecache.MetricsClient) error {
 	slog.Debug(gradleUserHomeEnv, "path", c.GradleUserHome)
 	return gradlecache.Restore(ctx, gradlecache.RestoreConfig{
-		Bucket:         c.Bucket,
-		Region:         c.Region,
-		CachewURL:      c.CachewURL,
-		KeyPrefix:      c.KeyPrefix,
-		CacheKey:       c.CacheKey,
-		GitDir:         c.GitDir,
-		Ref:            c.Ref,
-		Commits:        c.Commits,
-		MaxBlocks:      c.MaxBlocks,
-		GradleUserHome: c.GradleUserHome,
-		ProjectDir:     c.ProjectDir,
-		IncludedBuilds: c.IncludedBuilds,
-		Branch:         c.Branch,
-		Metrics:        metrics,
+		Bucket:    c.Bucket,
+		Region:    c.Region,
+		CachewURL: c.CachewURL,
+		KeyPrefix: c.KeyPrefix,
+		CacheKey:  c.CacheKey,
+		GitDir:    c.GitDir,
+		Ref:       c.Ref,
+		Commits:   c.Commits,
+		MaxBlocks: c.MaxBlocks,
+		Layout:    gradlecache.NewGradleLayout(c.GradleUserHome, c.ProjectDir, includedBuildsOrBuildSrc(c.IncludedBuilds)),
+		Branch:    c.Branch,
+		Metrics:   metrics,
 	})
 }
 
@@ -146,17 +152,20 @@ func (c *RestoreDeltaCmd) AfterApply() error {
 
 func (c *RestoreDeltaCmd) Run(ctx context.Context, metrics gradlecache.MetricsClient) error {
 	slog.Debug(gradleUserHomeEnv, "path", c.GradleUserHome)
+	layout := gradlecache.NewGradleLayout(c.GradleUserHome, c.ProjectDir, c.IncludedBuilds)
+	cachesDir := filepath.Join(layout.StateDir(), "caches")
+	if _, err := os.Stat(cachesDir); err != nil {
+		return errors.Errorf("caches directory not found at %s — run restore first: %w", cachesDir, err)
+	}
 	return gradlecache.RestoreDelta(ctx, gradlecache.RestoreDeltaConfig{
-		Bucket:         c.Bucket,
-		Region:         c.Region,
-		CachewURL:      c.CachewURL,
-		KeyPrefix:      c.KeyPrefix,
-		CacheKey:       c.CacheKey,
-		Branch:         c.Branch,
-		GradleUserHome: c.GradleUserHome,
-		ProjectDir:     c.ProjectDir,
-		IncludedBuilds: c.IncludedBuilds,
-		Metrics:        metrics,
+		Bucket:    c.Bucket,
+		Region:    c.Region,
+		CachewURL: c.CachewURL,
+		KeyPrefix: c.KeyPrefix,
+		CacheKey:  c.CacheKey,
+		Branch:    c.Branch,
+		Layout:    layout,
+		Metrics:   metrics,
 	})
 }
 
@@ -182,17 +191,15 @@ func (c *SaveCmd) AfterApply() error {
 func (c *SaveCmd) Run(ctx context.Context, metrics gradlecache.MetricsClient) error {
 	slog.Debug(gradleUserHomeEnv, "path", c.GradleUserHome)
 	return gradlecache.Save(ctx, gradlecache.SaveConfig{
-		Bucket:         c.Bucket,
-		Region:         c.Region,
-		CachewURL:      c.CachewURL,
-		KeyPrefix:      c.KeyPrefix,
-		CacheKey:       c.CacheKey,
-		Commit:         c.Commit,
-		GitDir:         c.GitDir,
-		GradleUserHome: c.GradleUserHome,
-		ProjectDir:     c.ProjectDir,
-		IncludedBuilds: c.IncludedBuilds,
-		Metrics:        metrics,
+		Bucket:    c.Bucket,
+		Region:    c.Region,
+		CachewURL: c.CachewURL,
+		KeyPrefix: c.KeyPrefix,
+		CacheKey:  c.CacheKey,
+		Commit:    c.Commit,
+		GitDir:    c.GitDir,
+		Layout:    gradlecache.NewGradleLayout(c.GradleUserHome, c.ProjectDir, includedBuildsOrBuildSrc(c.IncludedBuilds)),
+		Metrics:   metrics,
 	})
 }
 
@@ -217,16 +224,14 @@ func (c *SaveDeltaCmd) AfterApply() error {
 func (c *SaveDeltaCmd) Run(ctx context.Context, metrics gradlecache.MetricsClient) error {
 	slog.Debug(gradleUserHomeEnv, "path", c.GradleUserHome)
 	return gradlecache.SaveDelta(ctx, gradlecache.SaveDeltaConfig{
-		Bucket:         c.Bucket,
-		Region:         c.Region,
-		CachewURL:      c.CachewURL,
-		KeyPrefix:      c.KeyPrefix,
-		CacheKey:       c.CacheKey,
-		Branch:         c.Branch,
-		GradleUserHome: c.GradleUserHome,
-		ProjectDir:     c.ProjectDir,
-		IncludedBuilds: c.IncludedBuilds,
-		Metrics:        metrics,
+		Bucket:    c.Bucket,
+		Region:    c.Region,
+		CachewURL: c.CachewURL,
+		KeyPrefix: c.KeyPrefix,
+		CacheKey:  c.CacheKey,
+		Branch:    c.Branch,
+		Layout:    gradlecache.NewGradleLayout(c.GradleUserHome, c.ProjectDir, c.IncludedBuilds),
+		Metrics:   metrics,
 	})
 }
 

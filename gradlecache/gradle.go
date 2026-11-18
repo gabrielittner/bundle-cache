@@ -11,6 +11,82 @@ import (
 	"github.com/alecthomas/errors"
 )
 
+// gradleLayout is the Gradle implementation of Layout.
+type gradleLayout struct {
+	gradleUserHome string
+	projectDir     string
+	includedBuilds []string
+}
+
+// NewGradleLayout returns the layout of a Gradle build. gradleUserHome
+// defaults to ~/.gradle and projectDir defaults to the working directory.
+func NewGradleLayout(gradleUserHome, projectDir string, includedBuilds []string) Layout {
+	if gradleUserHome == "" {
+		home, _ := os.UserHomeDir()
+		gradleUserHome = filepath.Join(home, ".gradle")
+	}
+	if projectDir == "" {
+		projectDir = defaultProjectDir()
+	}
+	return gradleLayout{gradleUserHome: gradleUserHome, projectDir: projectDir, includedBuilds: includedBuilds}
+}
+
+func (l gradleLayout) StateDir() string { return l.gradleUserHome }
+
+func (l gradleLayout) Sources() ([]TarSource, error) {
+	cachesDir := filepath.Join(l.gradleUserHome, "caches")
+	if _, err := os.Stat(cachesDir); err != nil {
+		return nil, errors.Errorf("caches directory not found at %s: %w", cachesDir, err)
+	}
+	if err := validateProjectDir(l.projectDir); err != nil {
+		return nil, err
+	}
+	sources := []TarSource{{BaseDir: l.gradleUserHome, Path: "./caches"}}
+	if fi, err := os.Stat(filepath.Join(l.gradleUserHome, "wrapper")); err == nil && fi.IsDir() {
+		sources = append(sources, TarSource{BaseDir: l.gradleUserHome, Path: "./wrapper"})
+	}
+	return append(sources, ProjectDirSources(l.projectDir, l.includedBuilds)...), nil
+}
+
+func (l gradleLayout) Exclusions() []string {
+	return append(append([]string{}, CacheExclusions...), wrapperZipExclusion)
+}
+
+func (l gradleLayout) ExtractRules() []extractRule {
+	return []extractRule{
+		{prefix: "caches/", baseDir: l.gradleUserHome},
+		{prefix: "wrapper/", baseDir: l.gradleUserHome},
+		{prefix: "configuration-cache/", baseDir: filepath.Join(l.projectDir, ".gradle")},
+	}
+}
+
+func (l gradleLayout) DefaultDir() string { return l.projectDir }
+
+func (l gradleLayout) DeltaSources(since time.Time) ([]DeltaSource, error) {
+	if err := validateProjectDir(l.projectDir); err != nil {
+		return nil, err
+	}
+	cachesDir := filepath.Join(l.gradleUserHome, "caches")
+	realCaches, err := filepath.EvalSymlinks(cachesDir)
+	if err != nil {
+		realCaches = cachesDir
+	}
+	newFiles, err := CollectNewFiles(realCaches, since, l.gradleUserHome)
+	if err != nil {
+		return nil, errors.Wrap(err, "walk caches dir")
+	}
+	sources := []DeltaSource{{BaseDir: l.gradleUserHome, RelPaths: newFiles}}
+
+	// Collect new files from project-dir sources (configuration-cache, included builds).
+	for _, src := range ProjectDirSources(l.projectDir, l.includedBuilds) {
+		newProjectFiles := collectNewFilesSimple(filepath.Join(src.BaseDir, src.Path), src.BaseDir, since)
+		if len(newProjectFiles) > 0 {
+			sources = append(sources, DeltaSource{BaseDir: src.BaseDir, RelPaths: newProjectFiles})
+		}
+	}
+	return sources, nil
+}
+
 // CacheExclusions are patterns for files and directories that should never be
 // included in cache bundles (base or delta).
 var CacheExclusions = []string{
@@ -103,11 +179,6 @@ var DeltaExclusions = []string{
 // directory; the zip is kept for offline re-extraction but is never read during
 // normal builds. It's typically 100–150 MB and easily re-downloaded if needed.
 const wrapperZipExclusion = "wrapper/dists/*/*/*.zip"
-
-// gradleExclusions returns the tar --exclude patterns for a base bundle.
-func gradleExclusions() []string {
-	return append(append([]string{}, CacheExclusions...), wrapperZipExclusion)
-}
 
 // IsExcludedCache reports whether a file or directory name matches any cache exclusion pattern.
 func IsExcludedCache(name string) bool {

@@ -220,13 +220,8 @@ type RestoreConfig struct {
 	Commits string
 	// MaxBlocks is the number of distinct-author commit blocks to search. Defaults to 20.
 	MaxBlocks int
-	// GradleUserHome is the path to GRADLE_USER_HOME. Defaults to ~/.gradle.
-	GradleUserHome string
-	// ProjectDir is the project directory; defaults to cwd.
-	ProjectDir string
-	// IncludedBuilds lists included build directories whose build/ output to
-	// restore (relative to project root). Defaults to ["buildSrc"].
-	IncludedBuilds []string
+	// Layout describes where the bundle entries go.
+	Layout Layout
 	// Branch is an optional branch name to also apply a delta bundle for.
 	Branch string
 	// Metrics is an optional metrics client. If nil, a no-op client is used.
@@ -263,16 +258,6 @@ func (c *RestoreConfig) defaults() {
 	}
 	if c.MaxBlocks == 0 {
 		c.MaxBlocks = 20
-	}
-	if c.GradleUserHome == "" {
-		home, _ := os.UserHomeDir()
-		c.GradleUserHome = filepath.Join(home, ".gradle")
-	}
-	if c.ProjectDir == "" {
-		c.ProjectDir = defaultProjectDir()
-	}
-	if len(c.IncludedBuilds) == 0 {
-		c.IncludedBuilds = []string{"buildSrc"}
 	}
 	if c.Metrics == nil {
 		c.Metrics = NoopMetrics{}
@@ -438,17 +423,14 @@ func Restore(ctx context.Context, cfg RestoreConfig) error {
 	dlStart := time.Now()
 	log.Info("downloading bundle", "commit", hitCommit[:min(8, len(hitCommit))])
 
-	if err := os.MkdirAll(cfg.GradleUserHome, 0o750); err != nil {
-		return errors.Wrap(err, "create gradle user home dir")
+	stateDir := cfg.Layout.StateDir()
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		return errors.Wrap(err, "create state dir")
 	}
-	entries, _ := os.ReadDir(cfg.GradleUserHome)
-	gradleUserHomeEmpty := len(entries) == 0
+	entries, _ := os.ReadDir(stateDir)
+	stateDirEmpty := len(entries) == 0
 
-	rules := []extractRule{
-		{prefix: "caches/", baseDir: cfg.GradleUserHome},
-		{prefix: "wrapper/", baseDir: cfg.GradleUserHome},
-		{prefix: "configuration-cache/", baseDir: filepath.Join(cfg.ProjectDir, ".gradle")},
-	}
+	rules := cfg.Layout.ExtractRules()
 
 	body, err := store.get(ctx, hitCommit, cfg.CacheKey, hitInfo)
 	if err != nil {
@@ -458,7 +440,7 @@ func Restore(ctx context.Context, cfg RestoreConfig) error {
 
 	cb := &countingBody{r: body, dlStart: dlStart}
 	netTiming := &timingReader{r: cb}
-	ps, err := extractBundleZstd(ctx, netTiming, rules, cfg.ProjectDir, !gradleUserHomeEmpty)
+	ps, err := extractBundleZstd(ctx, netTiming, rules, cfg.Layout.DefaultDir(), !stateDirEmpty)
 	if err != nil {
 		// A truncated tar archive (e.g. from a crash during upload) produces an
 		// unexpected EOF during extraction. Treat this as a warning rather than
@@ -507,11 +489,11 @@ func Restore(ctx context.Context, cfg RestoreConfig) error {
 		cfg.Metrics.Distribution("gradle_cache.restore_base.speed_mbps", mbps, "cache_key:"+cfg.CacheKey)
 	}
 
-	if err := writeBaseCommitFile(cfg.GradleUserHome, hitCommit); err != nil {
+	if err := writeBaseCommitFile(stateDir, hitCommit); err != nil {
 		log.Warn("could not write base commit file", "err", err)
 	}
 
-	if err := touchMarkerFile(filepath.Join(cfg.GradleUserHome, ".cache-restore-marker")); err != nil {
+	if err := touchMarkerFile(filepath.Join(stateDir, ".cache-restore-marker")); err != nil {
 		log.Warn("could not write restore marker", "err", err)
 	}
 
@@ -536,7 +518,7 @@ func Restore(ctx context.Context, cfg RestoreConfig) error {
 					"speed_mbps", fmt.Sprintf("%.1f", float64(dr.n)/dlElapsed.Seconds()/1e6))
 			}
 			applyStart := time.Now()
-			if err := extractDeltaTarZstdRouted(dr.tmpFile, rules, cfg.ProjectDir); err != nil {
+			if err := extractDeltaTarZstdRouted(dr.tmpFile, rules, cfg.Layout.DefaultDir()); err != nil {
 				return errors.Wrap(err, "extract delta bundle")
 			}
 			applyElapsed := time.Since(applyStart)

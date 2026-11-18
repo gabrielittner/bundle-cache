@@ -98,29 +98,20 @@ func ReadDeltaBaseCommit(r io.ReadSeeker) (sha string, err error) {
 
 // RestoreDeltaConfig holds the parameters for a delta restore operation.
 type RestoreDeltaConfig struct {
-	Bucket         string
-	Region         string
-	CachewURL      string
-	KeyPrefix      string
-	CacheKey       string
-	Branch         string
-	GradleUserHome string
-	ProjectDir     string   // optional: route project-dir entries to their correct locations
-	IncludedBuilds []string // included build directories (for convention plugin outputs)
-	Metrics        MetricsClient
-	Logger         *slog.Logger
+	Bucket    string
+	Region    string
+	CachewURL string
+	KeyPrefix string
+	CacheKey  string
+	Branch    string
+	Layout    Layout
+	Metrics   MetricsClient
+	Logger    *slog.Logger
 }
 
 func (c *RestoreDeltaConfig) defaults() {
 	if c.Region == "" {
 		c.Region = defaultRegion()
-	}
-	if c.GradleUserHome == "" {
-		home, _ := os.UserHomeDir()
-		c.GradleUserHome = filepath.Join(home, ".gradle")
-	}
-	if c.ProjectDir == "" {
-		c.ProjectDir = defaultProjectDir()
 	}
 	if c.Metrics == nil {
 		c.Metrics = NoopMetrics{}
@@ -136,11 +127,6 @@ func RestoreDelta(ctx context.Context, cfg RestoreDeltaConfig) error {
 	cfg.defaults()
 	log := cfg.Logger
 
-	cachesDir := filepath.Join(cfg.GradleUserHome, "caches")
-	if _, err := os.Stat(cachesDir); err != nil {
-		return errors.Errorf("caches directory not found at %s — run restore first: %w", cachesDir, err)
-	}
-
 	store, err := newStore(cfg.Bucket, cfg.Region, cfg.CachewURL, cfg.KeyPrefix)
 	if err != nil {
 		return err
@@ -155,7 +141,7 @@ func RestoreDelta(ctx context.Context, cfg RestoreDeltaConfig) error {
 	log.Info("found delta bundle", "branch", cfg.Branch, "cache-key", cfg.CacheKey)
 
 	// Check metadata-level base-commit stamp against local base.
-	localBase, localBaseErr := readBaseCommitFile(cfg.GradleUserHome)
+	localBase, localBaseErr := readBaseCommitFile(cfg.Layout.StateDir())
 	metaBase := deltaInfo.Metadata[deltaBaseCommitMetaKey]
 	if metaBase != "" && localBaseErr != nil {
 		// Delta is stamped but we don't know what base we restored.
@@ -174,11 +160,6 @@ func RestoreDelta(ctx context.Context, cfg RestoreDeltaConfig) error {
 		return errors.Wrap(err, "get delta bundle")
 	}
 	defer body.Close() //nolint:errcheck,gosec
-
-	var pdSources []TarSource
-	if cfg.ProjectDir != "" {
-		pdSources = ProjectDirSources(cfg.ProjectDir, cfg.IncludedBuilds)
-	}
 
 	cb := &countingBody{r: body, dlStart: dlStart}
 	var extractSrc io.Reader = cb
@@ -207,7 +188,7 @@ func RestoreDelta(ctx context.Context, cfg RestoreDeltaConfig) error {
 		extractSrc = tmp
 	}
 
-	if err := extractDeltaTarZstd(ctx, extractSrc, cfg.GradleUserHome, pdSources); err != nil {
+	if err := extractDeltaTarZstd(extractSrc, cfg.Layout); err != nil {
 		return errors.Wrap(err, "extract delta bundle")
 	}
 
@@ -231,19 +212,17 @@ func RestoreDelta(ctx context.Context, cfg RestoreDeltaConfig) error {
 
 // SaveConfig holds the parameters for a cache save operation.
 type SaveConfig struct {
-	Bucket         string
-	Region         string
-	CachewURL      string
-	KeyPrefix      string
-	CacheKey       string
-	Commit         string
-	GitDir         string
-	GradleUserHome string
-	ProjectDir     string // project directory; defaults to cwd
-	IncludedBuilds []string
-	SkipWarm       bool // skip page cache warming (for benchmarking cold baseline)
-	Metrics        MetricsClient
-	Logger         *slog.Logger
+	Bucket    string
+	Region    string
+	CachewURL string
+	KeyPrefix string
+	CacheKey  string
+	Commit    string
+	GitDir    string
+	Layout    Layout
+	SkipWarm  bool // skip page cache warming (for benchmarking cold baseline)
+	Metrics   MetricsClient
+	Logger    *slog.Logger
 }
 
 func (c *SaveConfig) defaults() {
@@ -253,16 +232,6 @@ func (c *SaveConfig) defaults() {
 	if c.GitDir == "" {
 		c.GitDir = "."
 	}
-	if c.GradleUserHome == "" {
-		home, _ := os.UserHomeDir()
-		c.GradleUserHome = filepath.Join(home, ".gradle")
-	}
-	if c.ProjectDir == "" {
-		c.ProjectDir = defaultProjectDir()
-	}
-	if len(c.IncludedBuilds) == 0 {
-		c.IncludedBuilds = []string{"buildSrc"}
-	}
 	if c.Metrics == nil {
 		c.Metrics = NoopMetrics{}
 	}
@@ -271,7 +240,7 @@ func (c *SaveConfig) defaults() {
 	}
 }
 
-// Save archives GRADLE_USER_HOME/caches and uploads it to the configured backend.
+// Save archives the layout's sources and uploads them to the configured backend.
 func Save(ctx context.Context, cfg SaveConfig) error {
 	cfg.defaults()
 	log := cfg.Logger
@@ -287,11 +256,6 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 		return errors.Errorf("Commit must be a full 40-character hex SHA, got %q", cfg.Commit)
 	}
 
-	cachesDir := filepath.Join(cfg.GradleUserHome, "caches")
-	if _, err := os.Stat(cachesDir); err != nil {
-		return errors.Errorf("caches directory not found at %s: %w", cachesDir, err)
-	}
-
 	store, err := newStore(cfg.Bucket, cfg.Region, cfg.CachewURL, cfg.KeyPrefix)
 	if err != nil {
 		return err
@@ -302,14 +266,10 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 		return nil
 	}
 
-	if err := validateProjectDir(cfg.ProjectDir); err != nil {
+	sources, err := cfg.Layout.Sources()
+	if err != nil {
 		return err
 	}
-	sources := []TarSource{{BaseDir: cfg.GradleUserHome, Path: "./caches"}}
-	if fi, err := os.Stat(filepath.Join(cfg.GradleUserHome, "wrapper")); err == nil && fi.IsDir() {
-		sources = append(sources, TarSource{BaseDir: cfg.GradleUserHome, Path: "./wrapper"})
-	}
-	sources = append(sources, ProjectDirSources(cfg.ProjectDir, cfg.IncludedBuilds)...)
 
 	pr, pw := io.Pipe()
 
@@ -318,7 +278,7 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 	if !cfg.SkipWarm {
 		log.Debug("warming page cache")
 		warmStart := time.Now()
-		warmPageCache(ctx, sources, gradleExclusions())
+		warmPageCache(ctx, sources, cfg.Layout.Exclusions())
 		log.Debug("page cache warm", "duration", time.Since(warmStart).Round(time.Millisecond))
 	} else {
 		log.Debug("skipping page cache warm (SkipWarm=true)")
@@ -331,7 +291,7 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 
 	var archiveErr error
 	go func() {
-		archiveErr = CreateTarZstd(ctx, pw, sources, gradleExclusions())
+		archiveErr = CreateTarZstd(ctx, pw, sources, cfg.Layout.Exclusions())
 		pw.CloseWithError(archiveErr) //nolint:errcheck,gosec
 	}()
 
@@ -382,29 +342,20 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 
 // SaveDeltaConfig holds the parameters for a delta save operation.
 type SaveDeltaConfig struct {
-	Bucket         string
-	Region         string
-	CachewURL      string
-	KeyPrefix      string
-	CacheKey       string
-	Branch         string
-	GradleUserHome string
-	ProjectDir     string   // optional: scan project-dir sources for new entries
-	IncludedBuilds []string // included build directories (for convention plugin outputs)
-	Metrics        MetricsClient
-	Logger         *slog.Logger
+	Bucket    string
+	Region    string
+	CachewURL string
+	KeyPrefix string
+	CacheKey  string
+	Branch    string
+	Layout    Layout
+	Metrics   MetricsClient
+	Logger    *slog.Logger
 }
 
 func (c *SaveDeltaConfig) defaults() {
 	if c.Region == "" {
 		c.Region = defaultRegion()
-	}
-	if c.GradleUserHome == "" {
-		home, _ := os.UserHomeDir()
-		c.GradleUserHome = filepath.Join(home, ".gradle")
-	}
-	if c.ProjectDir == "" {
-		c.ProjectDir = defaultProjectDir()
 	}
 	if c.Metrics == nil {
 		c.Metrics = NoopMetrics{}
@@ -414,13 +365,13 @@ func (c *SaveDeltaConfig) defaults() {
 	}
 }
 
-// SaveDelta packs all cache files created since the last restore and uploads
-// them as a branch delta bundle.
+// SaveDelta packs all files that the layout reports as changed since the last
+// restore and uploads them as a branch delta bundle.
 func SaveDelta(ctx context.Context, cfg SaveDeltaConfig) error {
 	cfg.defaults()
 	log := cfg.Logger
 
-	markerPath := filepath.Join(cfg.GradleUserHome, ".cache-restore-marker")
+	markerPath := filepath.Join(cfg.Layout.StateDir(), ".cache-restore-marker")
 	markerInfo, err := os.Stat(markerPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -429,47 +380,23 @@ func SaveDelta(ctx context.Context, cfg SaveDeltaConfig) error {
 		}
 		return errors.Wrap(err, "stat restore marker")
 	}
-	if err := validateProjectDir(cfg.ProjectDir); err != nil {
-		return err
-	}
 	since := markerInfo.ModTime()
 	log.Debug("scanning for new cache files", "since", since.Format(time.RFC3339Nano))
 
-	cachesDir := filepath.Join(cfg.GradleUserHome, "caches")
-	realCaches, err := filepath.EvalSymlinks(cachesDir)
-	if err != nil {
-		realCaches = cachesDir
-	}
-
 	scanStart := time.Now()
-	newFiles, err := CollectNewFiles(realCaches, since, cfg.GradleUserHome)
+	sources, err := cfg.Layout.DeltaSources(since)
 	if err != nil {
-		return errors.Wrap(err, "walk caches dir")
+		return err
+	}
+	totalFiles := 0
+	for _, s := range sources {
+		totalFiles += len(s.RelPaths)
 	}
 	log.Debug("cache scan complete",
 		"duration", time.Since(scanStart).Round(time.Millisecond),
-		"new_files", len(newFiles))
+		"new_files", totalFiles)
 
-	// Collect new files from project-dir sources (configuration-cache, included builds).
-	var projectSources []DeltaSource
-	if cfg.ProjectDir != "" {
-		for _, src := range ProjectDirSources(cfg.ProjectDir, cfg.IncludedBuilds) {
-			newProjectFiles := collectNewFilesSimple(
-				filepath.Join(src.BaseDir, src.Path), src.BaseDir, since)
-			if len(newProjectFiles) > 0 {
-				log.Debug("project source scan complete", "path", src.Path, "new_files", len(newProjectFiles))
-				projectSources = append(projectSources, DeltaSource{
-					BaseDir: src.BaseDir, RelPaths: newProjectFiles,
-				})
-			}
-		}
-	}
-
-	projectFileCount := 0
-	for _, s := range projectSources {
-		projectFileCount += len(s.RelPaths)
-	}
-	if len(newFiles) == 0 && projectFileCount == 0 {
+	if totalFiles == 0 {
 		log.Info("no new cache files since restore, skipping delta save")
 		return nil
 	}
@@ -488,19 +415,17 @@ func SaveDelta(ctx context.Context, cfg SaveDeltaConfig) error {
 		os.Remove(tmp.Name()) //nolint:errcheck,gosec
 	}()
 
-	totalFiles := len(newFiles) + projectFileCount
 	dc := deltaCommit(cfg.Branch)
 	log.Info("saving delta bundle", "branch", cfg.Branch, "cache-key", cfg.CacheKey, "files", totalFiles)
 	saveStart := time.Now()
 
 	// Read the base commit that this delta was built on top of.
-	baseCommit, err := readBaseCommitFile(cfg.GradleUserHome)
+	baseCommit, err := readBaseCommitFile(cfg.Layout.StateDir())
 	if err != nil {
 		log.Warn("could not read base commit file, skipping delta save", "err", err)
 		return nil
 	}
 
-	sources := append([]DeltaSource{{BaseDir: cfg.GradleUserHome, RelPaths: newFiles}}, projectSources...)
 	if err := createDeltaTarZstd(tmp, baseCommit, sources...); err != nil {
 		return errors.Wrap(err, "create delta archive")
 	}
@@ -702,12 +627,13 @@ func createTarKlauspost(ctx context.Context, w io.Writer, tarArgs []string) erro
 	return errors.Join(errs...)
 }
 
-// extractDeltaTarZstd extracts a delta bundle. When projectDirSources is
-// non-empty, entries matching those prefixes are routed to their respective
-// base directories; everything else goes to gradleUserHome.
-func extractDeltaTarZstd(ctx context.Context, r io.Reader, gradleUserHome string, projectDirSources []TarSource) error {
-	if len(projectDirSources) == 0 {
-		return extractTarZstd(ctx, r, gradleUserHome)
+// extractDeltaTarZstd extracts a delta bundle. Entries matching the layout's
+// sources are routed to their respective base directories; everything else
+// goes to the layout's state dir.
+func extractDeltaTarZstd(r io.Reader, layout Layout) error {
+	sources, err := layout.Sources()
+	if err != nil {
+		return err
 	}
 	br := bufio.NewReaderSize(r, 8<<20)
 	dec, err := zstd.NewReader(br, zstd.WithDecoderConcurrency(runtime.GOMAXPROCS(0)))
@@ -716,13 +642,13 @@ func extractDeltaTarZstd(ctx context.Context, r io.Reader, gradleUserHome string
 	}
 	defer dec.Close()
 
-	// Build routing rules from project-dir sources.
+	// Build routing rules from the layout's sources.
 	type route struct {
 		prefix  string
 		baseDir string
 	}
 	var routes []route
-	for _, src := range projectDirSources {
+	for _, src := range sources {
 		// src.Path is like "./configuration-cache" — strip leading "./"
 		prefix := strings.TrimPrefix(src.Path, "./") + "/"
 		routes = append(routes, route{prefix: prefix, baseDir: src.BaseDir})
@@ -734,7 +660,7 @@ func extractDeltaTarZstd(ctx context.Context, r io.Reader, gradleUserHome string
 				return filepath.Join(r.baseDir, name)
 			}
 		}
-		return filepath.Join(gradleUserHome, name)
+		return filepath.Join(layout.StateDir(), name)
 	}
 	if err := extractTarPlatformRouted(dec, targetFn, false); err != nil {
 		return err

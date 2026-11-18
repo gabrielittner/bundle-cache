@@ -605,7 +605,7 @@ func TestTarZstdRoundTrip(t *testing.T) {
 
 	// Create archive into a buffer.
 	var buf bytes.Buffer
-	if err := CreateTarZstd(ctx, &buf, sources, gradleExclusions()); err != nil {
+	if err := CreateTarZstd(ctx, &buf, sources, gradleLayout{}.Exclusions()); err != nil {
 		t.Fatalf("CreateTarZstd: %v", err)
 	}
 
@@ -671,7 +671,7 @@ func TestTarZstdSymlinkDereference(t *testing.T) {
 	must(t, os.Symlink(realDir, cachesLink))
 
 	var buf bytes.Buffer
-	if err := CreateTarZstd(ctx, &buf, []TarSource{{BaseDir: srcDir, Path: "./caches"}}, gradleExclusions()); err != nil {
+	if err := CreateTarZstd(ctx, &buf, []TarSource{{BaseDir: srcDir, Path: "./caches"}}, gradleLayout{}.Exclusions()); err != nil {
 		t.Fatalf("CreateTarZstd: %v", err)
 	}
 
@@ -894,18 +894,18 @@ func TestSaveDeltaDefaultsProjectDirToWorkingDirectory(t *testing.T) {
 	defer srv.Close()
 
 	err = SaveDelta(ctx, SaveDeltaConfig{
-		CachewURL:      srv.URL,
-		CacheKey:       "test-cache",
-		Branch:         "feature/test",
-		GradleUserHome: gradleHome,
+		CachewURL: srv.URL,
+		CacheKey:  "test-cache",
+		Branch:    "feature/test",
+		Layout:    NewGradleLayout(gradleHome, "", nil),
 	})
 	must(t, err)
 
 	restoreDir := t.TempDir()
 	must(t, os.MkdirAll(filepath.Join(restoreDir, ".gradle"), 0o755))
-	must(t, extractDeltaTarZstd(ctx, bytes.NewReader(uploaded.Bytes()), restoreDir, []TarSource{
-		{BaseDir: filepath.Join(restoreDir, ".gradle"), Path: "./configuration-cache"},
-	}))
+	must(t, extractDeltaTarZstdRouted(bytes.NewReader(uploaded.Bytes()), []extractRule{
+		{prefix: "configuration-cache/", baseDir: filepath.Join(restoreDir, ".gradle")},
+	}, restoreDir))
 
 	if _, err := os.Stat(filepath.Join(restoreDir, ".gradle", "configuration-cache", "entry.bin")); err != nil {
 		t.Fatalf("expected configuration-cache entry in delta bundle: %v", err)
@@ -919,11 +919,10 @@ func TestSaveDeltaErrorsWhenProjectDirDoesNotExist(t *testing.T) {
 	must(t, touchMarkerFile(filepath.Join(gradleHome, ".cache-restore-marker")))
 
 	err := SaveDelta(ctx, SaveDeltaConfig{
-		CachewURL:      "http://example.invalid",
-		CacheKey:       "test-cache",
-		Branch:         "feature/test",
-		GradleUserHome: gradleHome,
-		ProjectDir:     filepath.Join(t.TempDir(), "does-not-exist"),
+		CachewURL: "http://example.invalid",
+		CacheKey:  "test-cache",
+		Branch:    "feature/test",
+		Layout:    NewGradleLayout(gradleHome, filepath.Join(t.TempDir(), "does-not-exist"), nil),
 	})
 	if err == nil {
 		t.Fatal("expected SaveDelta to fail when project dir does not exist")
@@ -940,11 +939,10 @@ func TestSaveDeltaSkipsColdStartBeforeProjectDirValidation(t *testing.T) {
 
 	projectDir := t.TempDir()
 	err := SaveDelta(ctx, SaveDeltaConfig{
-		CachewURL:      "http://example.invalid",
-		CacheKey:       "test-cache",
-		Branch:         "feature/test",
-		GradleUserHome: gradleHome,
-		ProjectDir:     projectDir,
+		CachewURL: "http://example.invalid",
+		CacheKey:  "test-cache",
+		Branch:    "feature/test",
+		Layout:    NewGradleLayout(gradleHome, projectDir, nil),
 	})
 	if err != nil {
 		t.Fatalf("expected cold-start SaveDelta to skip without validating project dir, got %v", err)
@@ -961,11 +959,10 @@ func TestSaveDeltaReturnsMarkerStatErrors(t *testing.T) {
 	must(t, os.MkdirAll(filepath.Join(projectDir, ".gradle"), 0o755))
 
 	err := SaveDelta(ctx, SaveDeltaConfig{
-		CachewURL:      "http://example.invalid",
-		CacheKey:       "test-cache",
-		Branch:         "feature/test",
-		GradleUserHome: gradleHome,
-		ProjectDir:     projectDir,
+		CachewURL: "http://example.invalid",
+		CacheKey:  "test-cache",
+		Branch:    "feature/test",
+		Layout:    NewGradleLayout(gradleHome, projectDir, nil),
 	})
 	if err == nil {
 		t.Fatal("expected SaveDelta to return non-not-exist restore marker stat errors")
@@ -981,12 +978,11 @@ func TestSaveErrorsWhenProjectDirDoesNotExist(t *testing.T) {
 	must(t, os.MkdirAll(filepath.Join(gradleHome, "caches"), 0o755))
 
 	err := Save(ctx, SaveConfig{
-		CachewURL:      "http://example.invalid",
-		CacheKey:       "test-cache",
-		Commit:         strings.Repeat("a", 40),
-		GradleUserHome: gradleHome,
-		ProjectDir:     filepath.Join(t.TempDir(), "does-not-exist"),
-		SkipWarm:       true,
+		CachewURL: "http://example.invalid",
+		CacheKey:  "test-cache",
+		Commit:    strings.Repeat("a", 40),
+		Layout:    NewGradleLayout(gradleHome, filepath.Join(t.TempDir(), "does-not-exist"), nil),
+		SkipWarm:  true,
 	})
 	if err == nil {
 		t.Fatal("expected Save to fail when project dir does not exist")
