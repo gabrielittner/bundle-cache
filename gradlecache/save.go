@@ -191,6 +191,9 @@ func RestoreDelta(ctx context.Context, cfg RestoreDeltaConfig) error {
 	if err := extractDeltaTarZstd(extractSrc, cfg.Layout); err != nil {
 		return errors.Wrap(err, "extract delta bundle")
 	}
+	if err := cfg.Layout.AfterRestore(); err != nil {
+		return errors.Wrap(err, "after restore")
+	}
 
 	if !cb.eofAt.IsZero() {
 		dlElapsed := cb.eofAt.Sub(dlStart)
@@ -266,6 +269,9 @@ func Save(ctx context.Context, cfg SaveConfig) error {
 		return nil
 	}
 
+	if err := cfg.Layout.BeforeSave(false); err != nil {
+		return errors.Wrap(err, "before save")
+	}
 	sources, err := cfg.Layout.Sources()
 	if err != nil {
 		return err
@@ -382,6 +388,10 @@ func SaveDelta(ctx context.Context, cfg SaveDeltaConfig) error {
 	}
 	since := markerInfo.ModTime()
 	log.Debug("scanning for new cache files", "since", since.Format(time.RFC3339Nano))
+
+	if err := cfg.Layout.BeforeSave(true); err != nil {
+		return errors.Wrap(err, "before save")
+	}
 
 	scanStart := time.Now()
 	sources, err := cfg.Layout.DeltaSources(since)

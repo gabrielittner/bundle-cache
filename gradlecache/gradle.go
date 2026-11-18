@@ -62,6 +62,10 @@ func (l gradleLayout) ExtractRules() []extractRule {
 
 func (l gradleLayout) DefaultDir() string { return l.projectDir }
 
+func (l gradleLayout) BeforeSave(bool) error { return nil }
+
+func (l gradleLayout) AfterRestore() error { return nil }
+
 func (l gradleLayout) DeltaSources(since time.Time) ([]DeltaSource, error) {
 	if err := validateProjectDir(l.projectDir); err != nil {
 		return nil, err

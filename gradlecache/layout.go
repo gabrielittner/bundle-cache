@@ -19,4 +19,9 @@ type Layout interface {
 	// DeltaSources returns the files to put in a branch delta: the files that
 	// changed after since.
 	DeltaSources(since time.Time) ([]DeltaSource, error)
+	// BeforeSave runs before a base save (delta is false) or a delta save
+	// (delta is true) collects its files.
+	BeforeSave(delta bool) error
+	// AfterRestore runs after a restore extracted the base and the delta.
+	AfterRestore() error
 }

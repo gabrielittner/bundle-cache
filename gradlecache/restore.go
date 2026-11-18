@@ -536,6 +536,10 @@ func Restore(ctx context.Context, cfg RestoreConfig) error {
 		}
 	}
 
+	if err := cfg.Layout.AfterRestore(); err != nil {
+		return errors.Wrap(err, "after restore")
+	}
+
 	restoreTotal := time.Since(findStart)
 	log.Info("restore complete", "total_duration", restoreTotal.Round(time.Millisecond))
 	cfg.Metrics.Distribution("gradle_cache.restore.duration_ms", float64(restoreTotal.Milliseconds()),
